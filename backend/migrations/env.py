@@ -14,6 +14,9 @@ sync_url = (
     settings.database_url
     .replace("+asyncpg", "+psycopg")
     .replace("+aiosqlite", "")
+    # asyncpg's "ssl" query param isn't understood by psycopg/libpq, which
+    # expects "sslmode" instead.
+    .replace("ssl=", "sslmode=")
 )
 config.set_main_option("sqlalchemy.url", sync_url)
 target_metadata = Base.metadata
