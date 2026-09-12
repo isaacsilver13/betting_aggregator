@@ -4,6 +4,7 @@ interface OddsRequestOptions {
   eventId?: string;
   marketType?: MarketType;
   forceRefresh?: boolean;
+  includeProps?: boolean;
 }
 
 export async function fetchOdds(
@@ -14,6 +15,7 @@ export async function fetchOdds(
   if (options.eventId) params.set("event_id", options.eventId);
   if (options.marketType) params.set("market_type", options.marketType);
   if (options.forceRefresh) params.set("force_refresh", "true");
+  if (options.includeProps) params.set("include_props", "true");
 
   const response = await fetch(`/api/v1/odds?${params.toString()}`);
 

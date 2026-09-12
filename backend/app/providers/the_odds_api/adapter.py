@@ -1,8 +1,10 @@
+import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.domain.models import Event, EventComparison, MarketType, Offer, OfferStatus, Sport
+from app.providers.errors import OddsProviderError
 from app.providers.the_odds_api.client import TheOddsApiClient, market_type_for_key, sport_key
 
 
@@ -10,8 +12,9 @@ class TheOddsApiProvider:
     name = "the_odds_api"
     status = "configured"
 
-    def __init__(self, client: TheOddsApiClient) -> None:
+    def __init__(self, client: TheOddsApiClient, max_concurrent_prop_fetches: int = 5) -> None:
         self.client = client
+        self._prop_fetch_semaphore = asyncio.Semaphore(max_concurrent_prop_fetches)
 
     @property
     def quota_remaining(self) -> Optional[int]:
@@ -23,13 +26,45 @@ class TheOddsApiProvider:
         event_id: Optional[str] = None,
         market_type: Optional[MarketType] = None,
         force_refresh: bool = False,
+        include_player_props: bool = False,
     ) -> Sequence[EventComparison]:
         sports = [sport] if sport else list(Sport)
         comparisons: list[EventComparison] = []
         for requested_sport in sports:
             payload = await self.client.fetch_odds(requested_sport)
-            comparisons.extend(self._normalize_events(payload, requested_sport))
+            sport_comparisons = self._normalize_events(payload, requested_sport)
+            if include_player_props:
+                sport_comparisons = await self._attach_player_props(sport_comparisons, requested_sport)
+            comparisons.extend(sport_comparisons)
         return comparisons
+
+    async def _attach_player_props(
+        self, comparisons: list[EventComparison], sport: Sport
+    ) -> list[EventComparison]:
+        """Fetch and merge player-prop offers for each event.
+
+        One extra API request per event -- bounded by a semaphore and
+        stopped early once the client's quota is exhausted -- so a single
+        page load can't silently burn the whole free-tier budget.
+        """
+
+        async def fetch_one(comparison: EventComparison) -> EventComparison:
+            async with self._prop_fetch_semaphore:
+                if self.client.quota_remaining is not None and self.client.quota_remaining <= 0:
+                    return comparison
+                raw_event_id = comparison.event.id.split(":", 1)[1]
+                try:
+                    raw_payload = await self.client.fetch_event_player_props(sport, raw_event_id)
+                except OddsProviderError:
+                    return comparison
+                if not raw_payload:
+                    return comparison
+                prop_offers = self._normalize_offers(
+                    raw_payload, comparison.event.id, datetime.now(timezone.utc)
+                )
+                return EventComparison(event=comparison.event, offers=[*comparison.offers, *prop_offers])
+
+        return list(await asyncio.gather(*(fetch_one(comparison) for comparison in comparisons)))
 
     def _normalize_events(
         self, payload: list[dict[str, Any]], sport: Sport

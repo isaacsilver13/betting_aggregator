@@ -17,7 +17,7 @@ class CachedOddsProvider:
         self.ttl = timedelta(seconds=ttl_seconds)
         self.min_quota_remaining = min_quota_remaining
         self._cache: dict[
-            tuple[Optional[Sport], Optional[str], Optional[MarketType]],
+            tuple[Optional[Sport], Optional[str], Optional[MarketType], bool],
             tuple[datetime, Sequence[EventComparison]],
         ] = {}
         self._lock = asyncio.Lock()
@@ -66,8 +66,9 @@ class CachedOddsProvider:
         event_id: Optional[str] = None,
         market_type: Optional[MarketType] = None,
         force_refresh: bool = False,
+        include_player_props: bool = False,
     ) -> Sequence[EventComparison]:
-        cache_key = (sport, event_id, market_type)
+        cache_key = (sport, event_id, market_type, include_player_props)
         now = datetime.now(timezone.utc)
         cached = self._cache.get(cache_key)
         if not force_refresh and cached and now - cached[0] < self.ttl:
@@ -100,6 +101,7 @@ class CachedOddsProvider:
                         event_id=event_id,
                         market_type=market_type,
                         force_refresh=force_refresh,
+                        include_player_props=include_player_props,
                     )
                 ]
                 comparisons = scope_comparisons(comparisons, event_id, market_type)

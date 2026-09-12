@@ -1,23 +1,35 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 from app.domain.models import MarketType, Sport
+from app.providers.errors import ProviderTimeoutError
 from app.providers.the_odds_api.adapter import TheOddsApiProvider, american_to_decimal
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "the_odds_api_nfl.json"
 
 
 class FakeTheOddsApiClient:
-    def __init__(self, payload: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        payload: list[dict[str, Any]],
+        prop_payloads: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> None:
         self.payload = payload
+        self.prop_payloads = prop_payloads or {}
         self.requested_sports: list[Sport] = []
+        self.requested_prop_event_ids: list[str] = []
+        self.quota_remaining: Optional[int] = None
 
     async def fetch_odds(self, sport: Sport) -> list[dict[str, Any]]:
         self.requested_sports.append(sport)
         return self.payload
+
+    async def fetch_event_player_props(self, sport: Sport, event_id: str) -> dict[str, Any]:
+        self.requested_prop_event_ids.append(event_id)
+        return self.prop_payloads.get(event_id, {})
 
 
 def test_normalizes_events_main_markets_and_props() -> None:
@@ -68,3 +80,83 @@ def test_normalizes_events_main_markets_and_props() -> None:
 def test_american_to_decimal_handles_positive_and_negative_prices() -> None:
     assert american_to_decimal(150) == 2.5
     assert american_to_decimal(-200) == 1.5
+
+
+def test_get_comparisons_without_props_never_calls_per_event_endpoint() -> None:
+    payload = json.loads(FIXTURE_PATH.read_text())
+    client = FakeTheOddsApiClient(payload)
+    provider = TheOddsApiProvider(client)
+
+    asyncio.run(provider.get_comparisons(Sport.NFL))
+
+    assert client.requested_prop_event_ids == []
+
+
+def test_include_player_props_merges_per_event_offers() -> None:
+    payload = json.loads(FIXTURE_PATH.read_text())
+    prop_payload = {
+        "id": "event-nfl-1",
+        "bookmakers": [
+            {
+                "key": "draftkings",
+                "title": "DraftKings",
+                "markets": [
+                    {
+                        "key": "player_anytime_td",
+                        "last_update": "2026-09-08T12:00:00Z",
+                        "outcomes": [
+                            {"name": "Yes", "description": "Lead Receiver", "price": 150},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    client = FakeTheOddsApiClient(payload, prop_payloads={"event-nfl-1": prop_payload})
+    provider = TheOddsApiProvider(client)
+
+    comparisons = asyncio.run(
+        provider.get_comparisons(Sport.NFL, include_player_props=True)
+    )
+
+    assert client.requested_prop_event_ids == ["event-nfl-1"]
+    comparison = comparisons[0]
+    anytime_td = next(
+        offer for offer in comparison.offers if offer.market_type is MarketType.PLAYER_ANYTIME_TOUCHDOWN
+    )
+    assert anytime_td.player_name == "Lead Receiver"
+    # Main-market offers from fetch_odds are still present alongside the props.
+    assert any(offer.market_type is MarketType.MONEYLINE for offer in comparison.offers)
+
+
+def test_include_player_props_stops_once_quota_is_exhausted() -> None:
+    payload = json.loads(FIXTURE_PATH.read_text())
+    client = FakeTheOddsApiClient(payload)
+    client.quota_remaining = 0
+    provider = TheOddsApiProvider(client)
+
+    comparisons = asyncio.run(
+        provider.get_comparisons(Sport.NFL, include_player_props=True)
+    )
+
+    assert client.requested_prop_event_ids == []
+    assert comparisons[0].offers  # main-market offers are unaffected
+
+
+def test_include_player_props_skips_event_on_per_event_error() -> None:
+    payload = json.loads(FIXTURE_PATH.read_text())
+
+    class FailingPropsClient(FakeTheOddsApiClient):
+        async def fetch_event_player_props(self, sport, event_id):
+            self.requested_prop_event_ids.append(event_id)
+            raise ProviderTimeoutError("props request timed out")
+
+    client = FailingPropsClient(payload)
+    provider = TheOddsApiProvider(client)
+
+    comparisons = asyncio.run(
+        provider.get_comparisons(Sport.NFL, include_player_props=True)
+    )
+
+    assert client.requested_prop_event_ids == ["event-nfl-1"]
+    assert comparisons[0].offers  # main-market offers survive the props failure

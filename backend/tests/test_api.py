@@ -33,7 +33,7 @@ class FailingProvider:
     status = "configured"
 
     async def get_comparisons(
-        self, sport=None, event_id=None, market_type=None, force_refresh=False
+        self, sport=None, event_id=None, market_type=None, force_refresh=False, include_player_props=False
     ):
         raise ProviderTimeoutError("provider timed out")
 
@@ -233,6 +233,23 @@ def test_odds_route_records_failed_refresh_separately(monkeypatch) -> None:
     assert len(repository.calls) == 1
     assert "failure" in repository.calls[0]
     assert repository.calls[0]["failure"]["error_type"] == "timeout"
+
+
+def test_odds_route_include_props_returns_player_prop_offers(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FixtureOddsProvider())
+    monkeypatch.setattr("app.api.routes.repository", None)
+
+    without_props = client.get("/api/v1/odds", params={"sport": "nba"}).json()
+    with_props = client.get(
+        "/api/v1/odds", params={"sport": "nba", "include_props": "true"}
+    ).json()
+
+    assert not any(
+        offer["market_type"] == "player_points" for offer in without_props["events"][0]["offers"]
+    )
+    assert any(
+        offer["market_type"] == "player_points" for offer in with_props["events"][0]["offers"]
+    )
 
 
 def test_provider_selection_uses_the_odds_api_key(monkeypatch) -> None:

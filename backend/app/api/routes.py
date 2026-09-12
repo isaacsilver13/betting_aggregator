@@ -85,6 +85,14 @@ async def get_odds(
     event_id: Optional[str] = Query(default=None, min_length=1),
     market_type: Optional[MarketType] = Query(default=None),
     force_refresh: bool = Query(default=False),
+    include_props: bool = Query(
+        default=False,
+        description=(
+            "Also fetch player-prop offers. Costs one extra provider request "
+            "per event, so only set this when the UI is actually showing a "
+            "player-prop market."
+        ),
+    ),
 ) -> ComparisonResponse:
     started_at = datetime.now(timezone.utc)
     provider_error: Optional[OddsProviderError] = None
@@ -94,6 +102,7 @@ async def get_odds(
             event_id=event_id,
             market_type=market_type,
             force_refresh=force_refresh,
+            include_player_props=include_props,
         )
     except OddsProviderError as error:
         provider_error = error

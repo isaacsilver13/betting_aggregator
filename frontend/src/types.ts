@@ -9,10 +9,29 @@ export type MarketType =
   | "player_rebounds"
   | "player_assists"
   | "player_threes"
+  | "player_points_rebounds_assists"
   | "player_passing_yards"
   | "player_rushing_yards"
   | "player_receiving_yards"
+  | "player_passing_rushing_yards"
   | "player_anytime_touchdown";
+
+const PLAYER_PROP_MARKETS: ReadonlySet<MarketType> = new Set([
+  "player_points",
+  "player_rebounds",
+  "player_assists",
+  "player_threes",
+  "player_points_rebounds_assists",
+  "player_passing_yards",
+  "player_rushing_yards",
+  "player_receiving_yards",
+  "player_passing_rushing_yards",
+  "player_anytime_touchdown",
+]);
+
+export function isPlayerPropMarket(market: MarketType): boolean {
+  return PLAYER_PROP_MARKETS.has(market);
+}
 
 export type OfferStatus = "available" | "missing" | "suspended" | "stale";
 

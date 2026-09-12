@@ -19,9 +19,11 @@ class MarketType(str, Enum):
     PLAYER_REBOUNDS = "player_rebounds"
     PLAYER_ASSISTS = "player_assists"
     PLAYER_THREES = "player_threes"
+    PLAYER_POINTS_REBOUNDS_ASSISTS = "player_points_rebounds_assists"
     PLAYER_PASSING_YARDS = "player_passing_yards"
     PLAYER_RUSHING_YARDS = "player_rushing_yards"
     PLAYER_RECEIVING_YARDS = "player_receiving_yards"
+    PLAYER_PASSING_RUSHING_YARDS = "player_passing_rushing_yards"
     PLAYER_ANYTIME_TOUCHDOWN = "player_anytime_touchdown"
 
 

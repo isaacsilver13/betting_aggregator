@@ -15,6 +15,7 @@ class FixtureOddsProvider:
         event_id: Optional[str] = None,
         market_type: Optional[MarketType] = None,
         force_refresh: bool = False,
+        include_player_props: bool = False,
     ) -> Sequence[EventComparison]:
         requested_sport = sport or Sport.NFL
         observed_at = datetime.now(timezone.utc)
@@ -117,4 +118,41 @@ class FixtureOddsProvider:
                 deep_link="https://sportsbook.fanduel.com/",
             ),
         ]
+        if include_player_props:
+            offers.extend(self._player_prop_offers(requested_sport, event_id, observed_at))
         return [EventComparison(event=event, offers=offers)]
+
+    def _player_prop_offers(
+        self, sport: Sport, event_id: str, observed_at: datetime
+    ) -> list[Offer]:
+        if sport is Sport.NBA:
+            props: list[tuple[MarketType, str, Optional[float], int]] = [
+                (MarketType.PLAYER_POINTS, "Star Guard", 24.5, -115),
+                (MarketType.PLAYER_REBOUNDS, "Star Guard", 5.5, -110),
+                (MarketType.PLAYER_ASSISTS, "Star Guard", 7.5, -120),
+                (MarketType.PLAYER_THREES, "Star Guard", 2.5, +100),
+                (MarketType.PLAYER_POINTS_REBOUNDS_ASSISTS, "Star Guard", 37.5, -110),
+            ]
+        else:
+            props = [
+                (MarketType.PLAYER_PASSING_YARDS, "Starting QB", 245.5, -115),
+                (MarketType.PLAYER_RUSHING_YARDS, "Starting QB", 22.5, -110),
+                (MarketType.PLAYER_PASSING_RUSHING_YARDS, "Starting QB", 268.5, -110),
+                (MarketType.PLAYER_RECEIVING_YARDS, "Lead Receiver", 68.5, -115),
+                (MarketType.PLAYER_ANYTIME_TOUCHDOWN, "Lead Receiver", None, +150),
+            ]
+        return [
+            Offer(
+                event_id=event_id,
+                provider=self.name,
+                bookmaker="DraftKings",
+                market_type=market_type,
+                selection=player_name,
+                player_name=player_name,
+                line=line,
+                price_american=price,
+                price_decimal=(1 + price / 100) if price >= 100 else (1 + 100 / abs(price)),
+                observed_at=observed_at,
+            )
+            for market_type, player_name, line, price in props
+        ]

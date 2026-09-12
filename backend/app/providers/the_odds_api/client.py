@@ -12,13 +12,50 @@ from app.providers.errors import (
     ProviderUpstreamError,
 )
 
-# Core markets available for all sports
-CORE_MARKETS = ("h2h", "spreads", "totals")
+# Core markets available for all sports, returned by the bulk /sports/{sport}/odds
+# endpoint used by fetch_odds(). Alternate spreads/totals are also available
+# in bulk (unlike player props, which require the per-event endpoint below).
+CORE_MARKETS = ("h2h", "spreads", "totals", "alternate_spreads", "alternate_totals")
+
+# Player prop markets are NOT returned by the bulk odds endpoint -- The Odds API
+# only exposes them per-event via /sports/{sport}/events/{event_id}/odds. See
+# fetch_event_player_props(). Each sport's list includes the corresponding
+# "_alternate" markets where The Odds API offers alternate lines; unsupported
+# keys are simply omitted from the response rather than erroring the request.
+NFL_PLAYER_PROP_MARKETS = (
+    "player_pass_yds",
+    "player_pass_yds_alternate",
+    "player_rush_yds",
+    "player_rush_yds_alternate",
+    "player_reception_yds",
+    "player_reception_yds_alternate",
+    "player_pass_rush_yds",
+    "player_pass_rush_yds_alternate",
+    "player_anytime_td",
+)
+
+NBA_PLAYER_PROP_MARKETS = (
+    "player_points",
+    "player_points_alternate",
+    "player_rebounds",
+    "player_rebounds_alternate",
+    "player_assists",
+    "player_assists_alternate",
+    "player_threes",
+    "player_threes_alternate",
+    "player_points_rebounds_assists",
+    "player_points_rebounds_assists_alternate",
+)
 
 # Map sports to their available markets
 SPORT_MARKETS = {
     "NFL": CORE_MARKETS,
     "NBA": CORE_MARKETS,
+}
+
+SPORT_PLAYER_PROP_MARKETS = {
+    "NFL": NFL_PLAYER_PROP_MARKETS,
+    "NBA": NBA_PLAYER_PROP_MARKETS,
 }
 
 
@@ -43,12 +80,44 @@ class TheOddsApiClient:
     async def fetch_odds(self, sport: Sport) -> list[dict[str, Any]]:
         sport_name = sport.value.upper()  # Convert Sport enum to string like "NFL", "NBA"
         markets = SPORT_MARKETS.get(sport_name, CORE_MARKETS)
-        params = {
-            "apiKey": self.api_key,
-            "regions": "us",
-            "markets": ",".join(markets),
-            "oddsFormat": "american",
-        }
+        payload = await self._get_json(
+            f"/sports/{sport_key(sport)}/odds",
+            {
+                "apiKey": self.api_key,
+                "regions": "us",
+                "markets": ",".join(markets),
+                "oddsFormat": "american",
+            },
+        )
+        if not isinstance(payload, list):
+            raise ProviderPayloadError("The Odds API returned a non-list payload")
+        return payload
+
+    async def fetch_event_player_props(self, sport: Sport, event_id: str) -> dict[str, Any]:
+        """Fetch player-prop odds for a single event.
+
+        The Odds API only exposes player props via this per-event endpoint,
+        not the bulk /sports/{sport}/odds endpoint fetch_odds() uses -- so
+        this costs one additional API request per event.
+        """
+        sport_name = sport.value.upper()
+        markets = SPORT_PLAYER_PROP_MARKETS.get(sport_name, ())
+        if not markets:
+            return {}
+        payload = await self._get_json(
+            f"/sports/{sport_key(sport)}/events/{event_id}/odds",
+            {
+                "apiKey": self.api_key,
+                "regions": "us",
+                "markets": ",".join(markets),
+                "oddsFormat": "american",
+            },
+        )
+        if not isinstance(payload, dict):
+            raise ProviderPayloadError("The Odds API returned a non-object payload for event odds")
+        return payload
+
+    async def _get_json(self, path: str, params: dict[str, str]) -> Any:
         for attempt in range(self.max_retries + 1):
             try:
                 async with httpx.AsyncClient(
@@ -56,7 +125,7 @@ class TheOddsApiClient:
                     timeout=self.timeout,
                     transport=self.transport,
                 ) as client:
-                    response = await client.get(f"/sports/{sport_key(sport)}/odds", params=params)
+                    response = await client.get(path, params=params)
                     self.quota_remaining = _quota_remaining(response)
                     if response.status_code in {401, 403}:
                         raise ProviderAuthError("The Odds API rejected the configured credentials")
@@ -67,10 +136,7 @@ class TheOddsApiClient:
                             f"The Odds API returned upstream status {response.status_code}"
                         )
                     response.raise_for_status()
-                    payload = response.json()
-                    if not isinstance(payload, list):
-                        raise ProviderPayloadError("The Odds API returned a non-list payload")
-                    return payload
+                    return response.json()
             except (ProviderAuthError, ProviderRateLimitError, ProviderPayloadError):
                 raise
             except httpx.TimeoutException as error:
@@ -103,6 +169,9 @@ def sport_key(sport: Sport) -> str:
 
 
 def market_type_for_key(market_key: str) -> Optional[MarketType]:
+    # Alternate-line markets share the same MarketType as their base market --
+    # the specific line is already captured per-offer via Offer.line, so
+    # alternates just show up as additional rows/lines under the same market.
     return {
         "h2h": MarketType.MONEYLINE,
         "spreads": MarketType.SPREAD,
@@ -110,12 +179,23 @@ def market_type_for_key(market_key: str) -> Optional[MarketType]:
         "alternate_spreads": MarketType.ALTERNATE_SPREAD,
         "alternate_totals": MarketType.TOTAL,
         "player_points": MarketType.PLAYER_POINTS,
+        "player_points_alternate": MarketType.PLAYER_POINTS,
         "player_rebounds": MarketType.PLAYER_REBOUNDS,
+        "player_rebounds_alternate": MarketType.PLAYER_REBOUNDS,
         "player_assists": MarketType.PLAYER_ASSISTS,
+        "player_assists_alternate": MarketType.PLAYER_ASSISTS,
         "player_threes": MarketType.PLAYER_THREES,
+        "player_threes_alternate": MarketType.PLAYER_THREES,
+        "player_points_rebounds_assists": MarketType.PLAYER_POINTS_REBOUNDS_ASSISTS,
+        "player_points_rebounds_assists_alternate": MarketType.PLAYER_POINTS_REBOUNDS_ASSISTS,
         "player_pass_yds": MarketType.PLAYER_PASSING_YARDS,
+        "player_pass_yds_alternate": MarketType.PLAYER_PASSING_YARDS,
         "player_rush_yds": MarketType.PLAYER_RUSHING_YARDS,
+        "player_rush_yds_alternate": MarketType.PLAYER_RUSHING_YARDS,
         "player_reception_yds": MarketType.PLAYER_RECEIVING_YARDS,
+        "player_reception_yds_alternate": MarketType.PLAYER_RECEIVING_YARDS,
+        "player_pass_rush_yds": MarketType.PLAYER_PASSING_RUSHING_YARDS,
+        "player_pass_rush_yds_alternate": MarketType.PLAYER_PASSING_RUSHING_YARDS,
         "player_anytime_td": MarketType.PLAYER_ANYTIME_TOUCHDOWN,
     }.get(market_key)
 

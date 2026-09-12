@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchOdds } from "./lib/api";
 import { GlassCard } from "./components/GlassCard";
-import type { EventComparison, MarketType, Offer, Sport } from "./types";
+import { isPlayerPropMarket, type EventComparison, type MarketType, type Offer, type Sport } from "./types";
 
 const SPORTS: Array<{ id: Sport; label: string }> = [
   { id: "nfl", label: "NFL" },
@@ -20,6 +20,7 @@ const SECONDARY_MARKETS_BY_SPORT: Record<Sport, Array<{ id: MarketType; label: s
     { id: "alternate_spread", label: "Alternate spread" },
     { id: "player_passing_yards", label: "Passing yards" },
     { id: "player_rushing_yards", label: "Rushing yards" },
+    { id: "player_passing_rushing_yards", label: "Pass + rush yards" },
     { id: "player_receiving_yards", label: "Receiving yards" },
     { id: "player_anytime_touchdown", label: "Anytime TD" },
   ],
@@ -29,6 +30,7 @@ const SECONDARY_MARKETS_BY_SPORT: Record<Sport, Array<{ id: MarketType; label: s
     { id: "player_rebounds", label: "Rebounds" },
     { id: "player_assists", label: "Assists" },
     { id: "player_threes", label: "Threes" },
+    { id: "player_points_rebounds_assists", label: "Pts + reb + ast" },
   ],
 };
 
@@ -219,6 +221,7 @@ function App() {
   const [data, setData] = useState<Awaited<ReturnType<typeof fetchOdds>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshingKey, setRefreshingKey] = useState<string | null>(null);
+  const needsPlayerProps = secondaryMarket !== null && isPlayerPropMarket(secondaryMarket);
 
   useEffect(() => {
     let cancelled = false;
@@ -226,7 +229,7 @@ function App() {
     async function loadOdds() {
       setError(null);
       try {
-        const nextData = await fetchOdds(sport);
+        const nextData = await fetchOdds(sport, { includeProps: needsPlayerProps });
         if (!cancelled) {
           setData(nextData);
         }
@@ -241,7 +244,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [sport]);
+  }, [sport, needsPlayerProps]);
 
   const providerStatus = Object.entries(data?.provider_status ?? {});
   const secondaryMarkets = SECONDARY_MARKETS_BY_SPORT[sport];
@@ -254,6 +257,7 @@ function App() {
       const refreshed = await fetchOdds(sport, {
         eventId,
         forceRefresh: true,
+        includeProps: needsPlayerProps,
       });
       setData((current) =>
         current ? mergeScopedSnapshot(current, refreshed, eventId) : refreshed,

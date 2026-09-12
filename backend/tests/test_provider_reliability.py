@@ -24,6 +24,7 @@ class CountingProvider:
         event_id: Optional[str] = None,
         market_type=None,
         force_refresh: bool = False,
+        include_player_props: bool = False,
     ) -> list[EventComparison]:
         self.calls += 1
         if self.fail:
@@ -169,5 +170,40 @@ def test_odds_api_client_requests_main_and_alternate_markets(
         client = TheOddsApiClient("test-key", transport=httpx.MockTransport(handler))
 
         assert await client.fetch_odds(sport) == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("sport", "expected_path", "expected_markets"),
+    [
+        (
+            Sport.NFL,
+            "/v4/sports/americanfootball_nfl/events/event-1/odds",
+            {"player_pass_yds", "player_pass_rush_yds", "player_anytime_td"},
+        ),
+        (
+            Sport.NBA,
+            "/v4/sports/basketball_nba/events/event-1/odds",
+            {"player_points", "player_points_rebounds_assists"},
+        ),
+    ],
+)
+def test_odds_api_client_requests_player_props_per_event(
+    sport: Sport, expected_path: str, expected_markets: set[str]
+) -> None:
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == expected_path
+            requested_markets = set(request.url.params["markets"].split(","))
+            assert expected_markets.issubset(requested_markets)
+            # h2h/spreads/totals are only requested via fetch_odds, not here
+            assert "h2h" not in requested_markets
+            return httpx.Response(200, json={"id": "event-1", "bookmakers": []}, request=request)
+
+        client = TheOddsApiClient("test-key", transport=httpx.MockTransport(handler))
+
+        payload = await client.fetch_event_player_props(sport, "event-1")
+        assert payload == {"id": "event-1", "bookmakers": []}
 
     asyncio.run(scenario())

@@ -14,5 +14,6 @@ class OddsProvider(Protocol):
         event_id: Optional[str] = None,
         market_type: Optional[MarketType] = None,
         force_refresh: bool = False,
+        include_player_props: bool = False,
     ) -> Sequence[EventComparison]:
         ...
