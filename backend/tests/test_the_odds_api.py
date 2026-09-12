@@ -122,7 +122,9 @@ def test_include_player_props_merges_per_event_offers() -> None:
     assert client.requested_prop_event_ids == ["event-nfl-1"]
     comparison = comparisons[0]
     anytime_td = next(
-        offer for offer in comparison.offers if offer.market_type is MarketType.PLAYER_ANYTIME_TOUCHDOWN
+        offer
+        for offer in comparison.offers
+        if offer.market_type is MarketType.PLAYER_ANYTIME_TOUCHDOWN
     )
     assert anytime_td.player_name == "Lead Receiver"
     # Main-market offers from fetch_odds are still present alongside the props.

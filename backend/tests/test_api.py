@@ -33,7 +33,12 @@ class FailingProvider:
     status = "configured"
 
     async def get_comparisons(
-        self, sport=None, event_id=None, market_type=None, force_refresh=False, include_player_props=False
+        self,
+        sport=None,
+        event_id=None,
+        market_type=None,
+        force_refresh=False,
+        include_player_props=False,
     ):
         raise ProviderTimeoutError("provider timed out")
 

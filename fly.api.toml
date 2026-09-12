@@ -1,0 +1,35 @@
+app = "betting-aggregator-api"
+primary_region = "ewr"
+
+[build]
+dockerfile = "docker/Dockerfile.backend"
+
+[deploy]
+release_command = "alembic upgrade head"
+
+[http_service]
+internal_port = 8000
+force_https = true
+auto_stop_machines = "off"
+auto_start_machines = true
+min_machines_running = 1
+
+[[http_service.checks]]
+grace_period = "30s"
+interval = "30s"
+method = "GET"
+timeout = "15s"
+path = "/api/v1/health"
+
+[[vm]]
+memory = "512mb"
+cpus = 1
+cpu_kind = "shared"
+
+[env]
+APP_ENV = "production"
+PROVIDER_MODE = "live"
+ODDS_PROVIDER = "the_odds_api"
+PERSISTENCE_ENABLED = "true"
+CACHE_TTL_SECONDS = "300"
+PROVIDER_MIN_QUOTA_REMAINING = "5"

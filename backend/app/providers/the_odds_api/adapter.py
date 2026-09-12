@@ -34,7 +34,9 @@ class TheOddsApiProvider:
             payload = await self.client.fetch_odds(requested_sport)
             sport_comparisons = self._normalize_events(payload, requested_sport)
             if include_player_props:
-                sport_comparisons = await self._attach_player_props(sport_comparisons, requested_sport)
+                sport_comparisons = await self._attach_player_props(
+                    sport_comparisons, requested_sport
+                )
             comparisons.extend(sport_comparisons)
         return comparisons
 
@@ -62,7 +64,9 @@ class TheOddsApiProvider:
                 prop_offers = self._normalize_offers(
                     raw_payload, comparison.event.id, datetime.now(timezone.utc)
                 )
-                return EventComparison(event=comparison.event, offers=[*comparison.offers, *prop_offers])
+                return EventComparison(
+                    event=comparison.event, offers=[*comparison.offers, *prop_offers]
+                )
 
         return list(await asyncio.gather(*(fetch_one(comparison) for comparison in comparisons)))
 
