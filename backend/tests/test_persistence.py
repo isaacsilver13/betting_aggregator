@@ -1,11 +1,39 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+from app.config import ProviderMode, Settings
 from app.domain.models import MarketType
 from app.providers.fixture import FixtureOddsProvider
-from app.storage.database import create_schema, create_session_factory
+from app.storage.database import create_engine, create_schema, create_session_factory
 from app.storage.repository import OddsRepository
 from sqlalchemy.ext.asyncio import create_async_engine
+
+
+def _settings(database_url: str) -> Settings:
+    return Settings(
+        app_env="test",
+        provider_mode=ProviderMode.FIXTURE,
+        odds_provider="fixture",
+        the_odds_api_key=None,
+        database_url=database_url,
+        persistence_enabled=True,
+        observation_retention_days=90,
+        cache_ttl_seconds=300,
+        provider_min_quota_remaining=5,
+        provider_timeout_seconds=15.0,
+        provider_max_retries=2,
+        provider_backoff_seconds=0.5,
+    )
+
+
+def test_create_engine_disables_statement_cache_for_asyncpg() -> None:
+    engine = create_engine(_settings("postgresql+asyncpg://user:pass@localhost/db"))
+    assert engine.dialect.name == "postgresql"
+
+
+def test_create_engine_leaves_sqlite_connect_args_untouched() -> None:
+    engine = create_engine(_settings("sqlite+aiosqlite:///:memory:"))
+    assert engine.dialect.name == "sqlite"
 
 
 def test_fixture_comparisons_persist_as_immutable_observations() -> None:

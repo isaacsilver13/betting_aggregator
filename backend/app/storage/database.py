@@ -12,7 +12,13 @@ from app.storage.models import Base
 
 
 def create_engine(settings: Settings) -> AsyncEngine:
-    return create_async_engine(settings.database_url, pool_pre_ping=True)
+    connect_args = {}
+    if settings.database_url.startswith("postgresql+asyncpg"):
+        # Neon (and other PgBouncer-fronted Postgres) run pooled connections
+        # in transaction mode, which is incompatible with asyncpg's default
+        # server-side prepared statement caching.
+        connect_args["statement_cache_size"] = 0
+    return create_async_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
