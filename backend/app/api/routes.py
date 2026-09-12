@@ -11,6 +11,7 @@ from app.domain.models import (
     ProviderDetails,
     Sport,
 )
+from app.error_log import recent_errors
 from app.identity import canonicalize_comparison, scope_comparisons
 from app.providers.base import OddsProvider
 from app.providers.cache import CachedOddsProvider
@@ -77,6 +78,22 @@ async def status() -> dict[str, object]:
         "generated_at": getattr(provider, "last_refreshed_at", None),
         "event_count": getattr(provider, "cached_event_count", 0),
     }
+
+
+@router.get("/health/metrics")
+async def health_metrics() -> dict[str, object]:
+    return {
+        "last_activity_at": getattr(provider, "last_refreshed_at", None),
+        "data_freshness_at": getattr(provider, "last_refreshed_at", None),
+        "event_count": getattr(provider, "cached_event_count", 0),
+        "cache_hit": getattr(provider, "cache_hit", False),
+        "quota_remaining": getattr(provider, "quota_remaining", None),
+    }
+
+
+@router.get("/health/errors")
+async def health_errors() -> dict[str, object]:
+    return {"errors": recent_errors()}
 
 
 @router.get("/odds", response_model=ComparisonResponse)

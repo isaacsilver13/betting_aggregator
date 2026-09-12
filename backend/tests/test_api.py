@@ -257,6 +257,24 @@ def test_odds_route_include_props_returns_player_prop_offers(monkeypatch) -> Non
     )
 
 
+def test_health_metrics_reports_provider_state(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FixtureOddsProvider())
+
+    client.get("/api/v1/odds", params={"sport": "nfl"})
+    response = client.get("/api/v1/health/metrics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "last_activity_at" in payload
+    assert "quota_remaining" in payload
+
+
+def test_health_errors_returns_a_list(monkeypatch) -> None:
+    response = client.get("/api/v1/health/errors")
+    assert response.status_code == 200
+    assert isinstance(response.json()["errors"], list)
+
+
 def test_provider_selection_uses_the_odds_api_key(monkeypatch) -> None:
     monkeypatch.setenv("THE_ODDS_API_KEY", "test-key")
     monkeypatch.setenv("PROVIDER_MODE", "live")
