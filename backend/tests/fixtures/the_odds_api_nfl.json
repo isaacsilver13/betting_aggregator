@@ -1,0 +1,61 @@
+[
+  {
+    "id": "event-nfl-1",
+    "sport_key": "americanfootball_nfl",
+    "sport_title": "NFL",
+    "commence_time": "2026-09-13T17:00:00Z",
+    "home_team": "Home Hawks",
+    "away_team": "Away Bears",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-09-08T12:00:00Z",
+            "outcomes": [
+              {"name": "Home Hawks", "price": -120},
+              {"name": "Away Bears", "price": 105}
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2026-09-08T12:00:00Z",
+            "outcomes": [
+              {"name": "Home Hawks", "price": -110, "point": -2.5},
+              {"name": "Away Bears", "price": -110, "point": 2.5}
+            ]
+          },
+          {
+            "key": "alternate_spreads",
+            "last_update": "2026-09-08T12:00:00Z",
+            "outcomes": [
+              {"name": "Home Hawks", "price": -155, "point": -1.5},
+              {"name": "Away Bears", "price": 135, "point": 1.5},
+              {"name": "Home Hawks", "price": 125, "point": -4.5},
+              {"name": "Away Bears", "price": -145, "point": 4.5}
+            ]
+          },
+          {
+            "key": "player_pass_yds",
+            "last_update": "2026-09-08T12:00:00Z",
+            "outcomes": [
+              {"name": "Over", "description": "Quarterback One", "price": -115, "point": 245.5},
+              {"name": "Under", "description": "Quarterback One", "price": -105, "point": 245.5}
+            ]
+          },
+          {
+            "key": "unsupported_market",
+            "outcomes": [{"name": "Ignore me", "price": -110}]
+          }
+        ]
+      },
+      {
+        "key": "fanduel",
+        "title": "FanDuel",
+        "markets": []
+      }
+    ]
+  }
+]

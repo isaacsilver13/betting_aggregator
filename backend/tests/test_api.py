@@ -1,0 +1,242 @@
+import pytest
+from app.api.routes import build_provider
+from app.config import ProviderMode, load_settings
+from app.main import app
+from app.providers.cache import CachedOddsProvider
+from app.providers.errors import ProviderTimeoutError
+from app.providers.fixture import FixtureOddsProvider
+from app.providers.stub import EmptyOddsProvider
+from app.providers.the_odds_api import TheOddsApiProvider
+from fastapi.testclient import TestClient
+
+client = TestClient(app)
+
+
+class SpyRepository:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def record_comparisons(self, **kwargs):
+        self.calls.append(kwargs)
+        return 1
+
+    async def record_refresh_failure(self, **kwargs):
+        self.calls.append({"failure": kwargs})
+        return 1
+
+    async def prune_expired(self, *args, **kwargs):
+        return 0
+
+
+class FailingProvider:
+    name = "failing"
+    status = "configured"
+
+    async def get_comparisons(
+        self, sport=None, event_id=None, market_type=None, force_refresh=False
+    ):
+        raise ProviderTimeoutError("provider timed out")
+
+
+def test_health() -> None:
+    response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_status_reports_unconfigured_provider_without_fetching_odds(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", EmptyOddsProvider())
+
+    response = client.get("/api/v1/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "unconfigured",
+        "provider": "unconfigured",
+        "provider_status": "not_configured",
+        "data_stale": False,
+        "generated_at": None,
+        "event_count": 0,
+    }
+
+
+def test_status_reports_fixture_cache_after_odds_refresh(monkeypatch) -> None:
+    fixture = FixtureOddsProvider()
+    cached = CachedOddsProvider(fixture, ttl_seconds=60)
+    monkeypatch.setattr("app.api.routes.provider", cached)
+
+    odds_response = client.get("/api/v1/odds", params={"sport": "nfl"})
+    status_response = client.get("/api/v1/status")
+
+    assert odds_response.status_code == 200
+    assert status_response.status_code == 200
+    payload = status_response.json()
+    assert payload["status"] == "ok"
+    assert payload["provider"] == "fixture"
+    assert payload["provider_status"] == "configured"
+    assert payload["event_count"] == 1
+    assert payload["generated_at"] is not None
+
+
+def test_odds_contract_allows_empty_provider_result(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", EmptyOddsProvider())
+    monkeypatch.setattr("app.api.routes.repository", None)
+
+    response = client.get("/api/v1/odds", params={"sport": "nba"})
+
+    assert response.status_code == 200
+    assert response.json()["events"] == []
+    assert response.json()["provider_status"] == {"unconfigured": "not_configured"}
+
+
+def test_provider_selection_defaults_to_empty_without_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("ODDS_PROVIDER", raising=False)
+    monkeypatch.setattr("app.config._DOTENV_PATH", tmp_path / ".env")
+
+    assert isinstance(build_provider(), EmptyOddsProvider)
+
+
+def test_provider_selection_can_use_fixture_without_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    monkeypatch.setenv("ODDS_PROVIDER", "fixture")
+    monkeypatch.setattr("app.config._DOTENV_PATH", tmp_path / ".env")
+
+    assert isinstance(build_provider(), FixtureOddsProvider)
+
+
+def test_live_provider_requires_explicit_live_mode(monkeypatch) -> None:
+    monkeypatch.setenv("THE_ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_MODE", "fixture")
+
+    with pytest.raises(RuntimeError, match="PROVIDER_MODE=live"):
+        build_provider()
+
+
+def test_settings_load_provider_controls(monkeypatch) -> None:
+    monkeypatch.setenv("PROVIDER_MODE", "live")
+    monkeypatch.setenv("CACHE_TTL_SECONDS", "120")
+    monkeypatch.setenv("PROVIDER_MIN_QUOTA_REMAINING", "7")
+
+    settings = load_settings()
+
+    assert settings.provider_mode is ProviderMode.LIVE
+    assert settings.cache_ttl_seconds == 120
+    assert settings.provider_min_quota_remaining == 7
+
+
+def test_settings_load_dotenv_for_local_live_configuration(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("PROVIDER_MODE", raising=False)
+    monkeypatch.delenv("ODDS_PROVIDER", raising=False)
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "PROVIDER_MODE=live\n"
+        "ODDS_PROVIDER=the_odds_api\n"
+        "THE_ODDS_API_KEY=dotenv-test-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.config._DOTENV_PATH", dotenv_path)
+
+    settings = load_settings()
+
+    assert settings.provider_mode is ProviderMode.LIVE
+    assert settings.odds_provider == "the_odds_api"
+    assert settings.the_odds_api_key == "dotenv-test-key"
+
+
+def test_fixture_provider_reports_configured_status(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FixtureOddsProvider())
+
+    response = client.get("/api/v1/odds", params={"sport": "nfl"})
+
+    assert response.status_code == 200
+    assert response.json()["provider_status"] == {"fixture": "configured"}
+    assert response.json()["events"][0]["offers"]
+    assert response.json()["events"][0]["event"]["id"].startswith("event:")
+
+
+def test_odds_route_scopes_force_refresh_to_event_market(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FixtureOddsProvider())
+    monkeypatch.setattr("app.api.routes.repository", None)
+
+    initial = client.get("/api/v1/odds", params={"sport": "nfl"}).json()
+    event_id = initial["events"][0]["event"]["id"]
+    response = client.get(
+        "/api/v1/odds",
+        params={
+            "sport": "nfl",
+            "event_id": event_id,
+            "market_type": "moneyline",
+            "force_refresh": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["events"]) == 1
+    assert payload["events"][0]["event"]["id"] == event_id
+    assert {offer["market_type"] for offer in payload["events"][0]["offers"]} == {"moneyline"}
+
+
+def test_odds_route_scopes_alternate_spreads(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FixtureOddsProvider())
+    monkeypatch.setattr("app.api.routes.repository", None)
+
+    response = client.get(
+        "/api/v1/odds",
+        params={"sport": "nfl", "market_type": "alternate_spread"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["events"]
+    assert {offer["market_type"] for offer in payload["events"][0]["offers"]} == {
+        "alternate_spread"
+    }
+
+
+def test_odds_route_persists_fixture_comparison(monkeypatch) -> None:
+    repository = SpyRepository()
+    monkeypatch.setattr("app.api.routes.provider", FixtureOddsProvider())
+    monkeypatch.setattr("app.api.routes.repository", repository)
+
+    response = client.get("/api/v1/odds", params={"sport": "nba"})
+
+    assert response.status_code == 200
+    assert response.json()["events"]
+    assert len(repository.calls) == 1
+    assert repository.calls[0]["provider"] == "fixture"
+
+
+def test_odds_route_returns_typed_provider_error(monkeypatch) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FailingProvider())
+    monkeypatch.setattr("app.api.routes.repository", None)
+
+    response = client.get("/api/v1/odds", params={"sport": "nfl"})
+
+    assert response.status_code == 200
+    assert response.json()["events"] == []
+    assert response.json()["provider_status"] == {"failing": "error"}
+    assert response.json()["provider_details"]["failing"]["error_type"] == "timeout"
+
+
+def test_odds_route_records_failed_refresh_separately(monkeypatch) -> None:
+    repository = SpyRepository()
+    monkeypatch.setattr("app.api.routes.provider", FailingProvider())
+    monkeypatch.setattr("app.api.routes.repository", repository)
+
+    response = client.get("/api/v1/odds", params={"sport": "nfl"})
+
+    assert response.status_code == 200
+    assert len(repository.calls) == 1
+    assert "failure" in repository.calls[0]
+    assert repository.calls[0]["failure"]["error_type"] == "timeout"
+
+
+def test_provider_selection_uses_the_odds_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("THE_ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_MODE", "live")
+
+    assert isinstance(build_provider(), TheOddsApiProvider)

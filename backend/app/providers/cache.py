@@ -1,0 +1,115 @@
+import asyncio
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from app.domain.models import EventComparison, MarketType, Sport
+from app.identity import canonicalize_comparison, scope_comparisons
+from app.providers.base import OddsProvider
+from app.providers.errors import ProviderQuotaError
+
+
+class CachedOddsProvider:
+    def __init__(
+        self, provider: OddsProvider, ttl_seconds: int, min_quota_remaining: int = 0
+    ) -> None:
+        self.provider = provider
+        self.ttl = timedelta(seconds=ttl_seconds)
+        self.min_quota_remaining = min_quota_remaining
+        self._cache: dict[
+            tuple[Optional[Sport], Optional[str], Optional[MarketType]],
+            tuple[datetime, Sequence[EventComparison]],
+        ] = {}
+        self._lock = asyncio.Lock()
+        self._last_error_type: Optional[str] = None
+        self._cache_hit = False
+        self._last_refreshed_at: Optional[datetime] = None
+
+    @property
+    def name(self) -> str:
+        return self.provider.name
+
+    @property
+    def status(self) -> str:
+        if self._last_error_type and self._cache:
+            return "stale"
+        return self.provider.status
+
+    @property
+    def cache_hit(self) -> bool:
+        return self._cache_hit
+
+    @property
+    def last_error_type(self) -> Optional[str]:
+        return self._last_error_type
+
+    @property
+    def last_refreshed_at(self) -> Optional[datetime]:
+        return self._last_refreshed_at
+
+    @property
+    def quota_remaining(self) -> Optional[int]:
+        return getattr(self.provider, "quota_remaining", None)
+
+    @property
+    def cached_event_count(self) -> int:
+        event_ids = {
+            comparison.event.id
+            for comparisons in self._cache.values()
+            for comparison in comparisons[1]
+        }
+        return len(event_ids)
+
+    async def get_comparisons(
+        self,
+        sport: Optional[Sport] = None,
+        event_id: Optional[str] = None,
+        market_type: Optional[MarketType] = None,
+        force_refresh: bool = False,
+    ) -> Sequence[EventComparison]:
+        cache_key = (sport, event_id, market_type)
+        now = datetime.now(timezone.utc)
+        cached = self._cache.get(cache_key)
+        if not force_refresh and cached and now - cached[0] < self.ttl:
+            self._cache_hit = True
+            return cached[1]
+
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            cached = self._cache.get(cache_key)
+            if not force_refresh and cached and now - cached[0] < self.ttl:
+                self._cache_hit = True
+                return cached[1]
+
+            self._cache_hit = False
+            quota_remaining = getattr(self.provider, "quota_remaining", None)
+            if quota_remaining is not None and quota_remaining <= self.min_quota_remaining:
+                quota_error = ProviderQuotaError(
+                    f"Provider quota is {quota_remaining}; refresh threshold is "
+                    f"{self.min_quota_remaining}"
+                )
+                self._last_error_type = quota_error.error_type
+                if cached:
+                    return cached[1]
+                raise quota_error
+            try:
+                comparisons = [
+                    canonicalize_comparison(comparison)
+                    for comparison in await self.provider.get_comparisons(
+                        sport=sport,
+                        event_id=event_id,
+                        market_type=market_type,
+                        force_refresh=force_refresh,
+                    )
+                ]
+                comparisons = scope_comparisons(comparisons, event_id, market_type)
+            except Exception as error:
+                self._last_error_type = getattr(error, "error_type", type(error).__name__)
+                if cached:
+                    return cached[1]
+                raise
+
+            self._last_error_type = None
+            self._last_refreshed_at = now
+            self._cache[cache_key] = (now, comparisons)
+            return comparisons

@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: betting_aggregator
+      POSTGRES_USER: betting_aggregator
+      POSTGRES_PASSWORD: betting_aggregator
+    ports:
+      - "5433:5432"
+    volumes:
+      - betting_aggregator_pgdata:/var/lib/postgresql/data
+
+volumes:
+  betting_aggregator_pgdata:
