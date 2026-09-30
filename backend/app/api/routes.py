@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -116,6 +116,38 @@ async def get_odds(
     ),
 ) -> ComparisonResponse:
     started_at = datetime.now(timezone.utc)
+    if not force_refresh and not include_props and repository is not None and sport is not None:
+        # Daily gate: the in-memory cache dies whenever Fly stops the machine, so
+        # the last successful refresh recorded in the database is what actually
+        # limits how often we spend provider quota. Manual refresh bypasses it.
+        last_success = await repository.last_success_at(provider.name, sport)
+        if last_success is not None:
+            last_success = _aware(last_success)
+            if started_at - last_success < timedelta(seconds=settings.cache_ttl_seconds):
+                saved = await repository.latest_comparisons(provider.name, sport)
+                if saved:
+                    logger.info(
+                        "odds served from saved snapshot source=%s sport=%s games=%d age_s=%d",
+                        provider.name,
+                        sport.value,
+                        len(saved),
+                        (started_at - last_success).total_seconds(),
+                    )
+                    return ComparisonResponse(
+                        generated_at=started_at,
+                        provider_status={provider.name: "configured"},
+                        provider_details={
+                            provider.name: ProviderDetails(
+                                status="configured",
+                                cache_hit=True,
+                                last_refreshed_at=last_success,
+                                quota_remaining=getattr(provider, "quota_remaining", None),
+                            )
+                        },
+                        events=scope_comparisons(
+                            [canonicalize_comparison(c) for c in saved], event_id, market_type
+                        ),
+                    )
     provider_error: Optional[OddsProviderError] = None
     try:
         comparisons = await provider.get_comparisons(
@@ -189,12 +221,15 @@ async def get_odds(
     )
 
 
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def _newest_observation(comparisons: list[EventComparison]) -> Optional[datetime]:
     observed = [offer.observed_at for c in comparisons for offer in c.offers]
     if not observed:
         return None
-    newest = max(observed)
-    return newest if newest.tzinfo else newest.replace(tzinfo=timezone.utc)
+    return _aware(max(observed))
 
 
 def _log_fetch(

@@ -1,5 +1,6 @@
 import asyncio
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from app.api.routes import build_provider
@@ -32,6 +33,9 @@ class SpyRepository:
 
     async def latest_comparisons(self, provider, sport):
         return []
+
+    async def last_success_at(self, provider, sport):
+        return None
 
 
 class FailingProvider:
@@ -338,3 +342,82 @@ def test_logged_errors_show_up_in_health_errors() -> None:
     errors = client.get("/api/v1/health/errors").json()["errors"]
 
     assert any("odds fetch failed error_type=test" in entry["message"] for entry in errors)
+
+
+class RecordingProvider(FailingProvider):
+    """Fails loudly if the live provider is contacted."""
+
+    name = "failing"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_comparisons(self, **kwargs):
+        self.calls += 1
+        return await super().get_comparisons(**kwargs)
+
+
+def _saved_snapshot(observed_at):
+    saved = asyncio.run(FixtureOddsProvider().get_comparisons())
+    return [
+        c.model_copy(
+            update={"offers": [o.model_copy(update={"observed_at": observed_at}) for o in c.offers]}
+        )
+        for c in saved
+    ]
+
+
+class DailyGateRepository(SpyRepository):
+    def __init__(self, last_success, saved) -> None:
+        super().__init__()
+        self.last_success = last_success
+        self.saved = saved
+
+    async def last_success_at(self, provider, sport):
+        return self.last_success
+
+    async def latest_comparisons(self, provider, sport):
+        return self.saved
+
+
+def _gate(monkeypatch, age: timedelta, ttl_seconds: int = 86400):
+    now = datetime.now(timezone.utc)
+    provider = RecordingProvider()
+    repository = DailyGateRepository(now - age, _saved_snapshot(now - age))
+    monkeypatch.setattr("app.api.routes.provider", provider)
+    monkeypatch.setattr("app.api.routes.repository", repository)
+    monkeypatch.setattr(
+        "app.api.routes.settings",
+        replace(load_settings(), cache_ttl_seconds=ttl_seconds),
+    )
+    return provider, repository
+
+
+def test_recent_saved_refresh_is_served_without_calling_the_provider(monkeypatch) -> None:
+    provider, repository = _gate(monkeypatch, age=timedelta(hours=3))
+
+    body = client.get("/api/v1/odds?sport=nfl").json()
+
+    assert provider.calls == 0  # survives a machine restart: gate is the database
+    assert len(body["events"]) > 0
+    details = body["provider_details"]["failing"]
+    assert details["stale"] is False
+    assert details["cache_hit"] is True
+    assert body["provider_status"]["failing"] == "configured"
+    assert repository.calls == []  # nothing new to record
+
+
+def test_saved_refresh_older_than_the_ttl_triggers_a_live_refresh(monkeypatch) -> None:
+    provider, _ = _gate(monkeypatch, age=timedelta(hours=25))
+
+    client.get("/api/v1/odds?sport=nfl")
+
+    assert provider.calls == 1
+
+
+def test_manual_force_refresh_bypasses_the_daily_gate(monkeypatch) -> None:
+    provider, _ = _gate(monkeypatch, age=timedelta(minutes=5))
+
+    client.get("/api/v1/odds?sport=nfl&force_refresh=true")
+
+    assert provider.calls == 1

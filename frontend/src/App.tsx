@@ -11,8 +11,10 @@ import {
   type Sport,
 } from "./types";
 
+const REFRESH_ALL_KEY = "__all__";
+
 // Odds older than this get a warning even if the backend didn't flag them.
-const VERY_OLD_AFTER_MS = 24 * 60 * 60 * 1000;
+const VERY_OLD_AFTER_MS = 36 * 60 * 60 * 1000;
 
 function describeFreshness(
   details: ProviderDetails | undefined,
@@ -38,7 +40,7 @@ function describeFreshness(
     };
   }
   if (refreshedAt && now - refreshedAt.getTime() > VERY_OLD_AFTER_MS) {
-    return { updated, warning: `These odds are over a day old (last updated ${updated}).` };
+    return { updated, warning: `These odds are over 36 hours old (last updated ${updated}).` };
   }
   return { updated, warning: null };
 }
@@ -313,6 +315,20 @@ function App() {
     }
   }
 
+  // Odds refresh automatically at most once a day; this is the manual override.
+  // It spends provider quota (about 3 credits), so it is a deliberate click.
+  async function refreshAllOdds() {
+    setRefreshingKey(REFRESH_ALL_KEY);
+    setError(null);
+    try {
+      setData(await fetchOdds(sport, { forceRefresh: true, includeProps: needsPlayerProps }));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to refresh odds");
+    } finally {
+      setRefreshingKey(null);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -396,9 +412,19 @@ function App() {
           {freshness.warning}
         </div>
       )}
-      {freshness.updated && !freshness.warning && (
-        <p className="odds-updated">Odds last updated {freshness.updated}</p>
-      )}
+      <div className="odds-toolbar">
+        {freshness.updated && !freshness.warning && (
+          <p className="odds-updated">Odds last updated {freshness.updated}</p>
+        )}
+        <button
+          className="refresh-button"
+          disabled={refreshingKey !== null}
+          onClick={() => void refreshAllOdds()}
+          type="button"
+        >
+          {refreshingKey === REFRESH_ALL_KEY ? "Refreshing odds..." : "Refresh odds"}
+        </button>
+      </div>
 
       <section className="events-grid" aria-live="polite">
         {data?.events.length ? (
