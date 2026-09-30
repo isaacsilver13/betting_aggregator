@@ -6,14 +6,21 @@ from typing import Optional
 from app.domain.models import EventComparison, MarketType, Sport
 from app.identity import canonicalize_comparison, scope_comparisons
 from app.providers.base import OddsProvider
-from app.providers.errors import ProviderQuotaError
+from app.providers.errors import ProviderQuotaError, ProviderRateLimitError
 
 
 class CachedOddsProvider:
     def __init__(
-        self, provider: OddsProvider, ttl_seconds: int, min_quota_remaining: int = 0
+        self,
+        provider: OddsProvider,
+        ttl_seconds: int,
+        min_quota_remaining: int = 0,
+        rate_limit_cooldown_seconds: int = 900,
     ) -> None:
         self.provider = provider
+        self.rate_limit_cooldown = timedelta(seconds=rate_limit_cooldown_seconds)
+        self._cooldown_until: Optional[datetime] = None
+        self._cooldown_error: Optional[ProviderRateLimitError] = None
         self.ttl = timedelta(seconds=ttl_seconds)
         self.min_quota_remaining = min_quota_remaining
         self._cache: dict[
@@ -83,6 +90,12 @@ class CachedOddsProvider:
                 return cached[1]
 
             self._cache_hit = False
+            if self._cooldown_until is not None and now < self._cooldown_until:
+                # Backing off after a 429: don't spend more upstream calls.
+                self._last_error_type = ProviderRateLimitError.error_type
+                if cached:
+                    return cached[1]
+                raise self._cooldown_error or ProviderRateLimitError("Provider rate limited")
             quota_remaining = getattr(self.provider, "quota_remaining", None)
             if quota_remaining is not None and quota_remaining <= self.min_quota_remaining:
                 quota_error = ProviderQuotaError(
@@ -106,12 +119,16 @@ class CachedOddsProvider:
                 ]
                 comparisons = scope_comparisons(comparisons, event_id, market_type)
             except Exception as error:
+                if isinstance(error, ProviderRateLimitError):
+                    self._cooldown_until = now + self.rate_limit_cooldown
+                    self._cooldown_error = error
                 self._last_error_type = getattr(error, "error_type", type(error).__name__)
                 if cached:
                     return cached[1]
                 raise
 
             self._last_error_type = None
+            self._cooldown_until = None
             self._last_refreshed_at = now
             self._cache[cache_key] = (now, comparisons)
             return comparisons

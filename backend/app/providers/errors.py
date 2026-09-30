@@ -26,3 +26,7 @@ class ProviderUpstreamError(OddsProviderError):
 
 class ProviderPayloadError(OddsProviderError):
     error_type = "invalid_payload"
+
+
+class ProviderRequestRejectedError(ProviderUpstreamError):
+    """The provider answered with a 4xx other than auth/rate-limit (bad request)."""

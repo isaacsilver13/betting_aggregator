@@ -8,14 +8,17 @@ from app.providers.errors import (
     ProviderAuthError,
     ProviderPayloadError,
     ProviderRateLimitError,
+    ProviderRequestRejectedError,
     ProviderTimeoutError,
     ProviderUpstreamError,
 )
 
-# Core markets available for all sports, returned by the bulk /sports/{sport}/odds
-# endpoint used by fetch_odds(). Alternate spreads/totals are also available
-# in bulk (unlike player props, which require the per-event endpoint below).
-CORE_MARKETS = ("h2h", "spreads", "totals", "alternate_spreads", "alternate_totals")
+# Featured markets accepted by the bulk /sports/{sport}/odds endpoint used by
+# fetch_odds(). Anything else -- alternate lines and player props -- is only
+# served per event via /sports/{sport}/events/{event_id}/odds; asking for it in
+# bulk makes the whole request fail with 422 INVALID_MARKET (verified live
+# 2026-09-29), which left the app with no odds at all.
+CORE_MARKETS = ("h2h", "spreads", "totals")
 
 # Player prop markets are NOT returned by the bulk odds endpoint -- The Odds API
 # only exposes them per-event via /sports/{sport}/events/{event_id}/odds. See
@@ -135,9 +138,21 @@ class TheOddsApiClient:
                         raise ProviderUpstreamError(
                             f"The Odds API returned upstream status {response.status_code}"
                         )
-                    response.raise_for_status()
+                    if response.status_code >= 400:
+                        # Never retried: a 4xx (e.g. 422 INVALID_MARKET) will not
+                        # succeed on a second try. Report status + body only --
+                        # not the httpx error, whose text includes the apiKey URL.
+                        raise ProviderRequestRejectedError(
+                            f"The Odds API rejected the request with status "
+                            f"{response.status_code}: {response.text[:300]}"
+                        )
                     return response.json()
-            except (ProviderAuthError, ProviderRateLimitError, ProviderPayloadError):
+            except (
+                ProviderAuthError,
+                ProviderRateLimitError,
+                ProviderPayloadError,
+                ProviderRequestRejectedError,
+            ):
                 raise
             except httpx.TimeoutException as error:
                 if attempt >= self.max_retries:
