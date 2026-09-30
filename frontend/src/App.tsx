@@ -2,7 +2,48 @@ import { useEffect, useState } from "react";
 
 import { fetchOdds } from "./lib/api";
 import { GlassCard } from "./components/GlassCard";
-import { isPlayerPropMarket, type EventComparison, type MarketType, type Offer, type Sport } from "./types";
+import {
+  isPlayerPropMarket,
+  type EventComparison,
+  type MarketType,
+  type Offer,
+  type ProviderDetails,
+  type Sport,
+} from "./types";
+
+const REFRESH_ALL_KEY = "__all__";
+
+// Odds older than this get a warning even if the backend didn't flag them.
+const VERY_OLD_AFTER_MS = 36 * 60 * 60 * 1000;
+
+function describeFreshness(
+  details: ProviderDetails | undefined,
+  hasEvents: boolean,
+  now: number,
+): { updated: string | null; warning: string | null } {
+  if (!details) {
+    return { updated: null, warning: null };
+  }
+  const refreshedAt = details.last_refreshed_at ? new Date(details.last_refreshed_at) : null;
+  const updated = refreshedAt ? refreshedAt.toLocaleString() : null;
+  const reason = details.error_type ? details.error_type.replaceAll("_", " ") : "unknown error";
+  if (details.status === "error" && !hasEvents) {
+    return {
+      updated,
+      warning: `Odds are unavailable right now (${reason}). No saved odds to show yet.`,
+    };
+  }
+  if (details.stale) {
+    return {
+      updated,
+      warning: `Showing saved odds${updated ? ` from ${updated}` : ""}. The latest refresh failed (${reason}), so lines may have moved.`,
+    };
+  }
+  if (refreshedAt && now - refreshedAt.getTime() > VERY_OLD_AFTER_MS) {
+    return { updated, warning: `These odds are over 36 hours old (last updated ${updated}).` };
+  }
+  return { updated, warning: null };
+}
 
 const SPORTS: Array<{ id: Sport; label: string }> = [
   { id: "nfl", label: "NFL" },
@@ -247,6 +288,11 @@ function App() {
   }, [sport, needsPlayerProps]);
 
   const providerStatus = Object.entries(data?.provider_status ?? {});
+  const freshness = describeFreshness(
+    Object.values(data?.provider_details ?? {})[0],
+    (data?.events.length ?? 0) > 0,
+    Date.now(),
+  );
   const secondaryMarkets = SECONDARY_MARKETS_BY_SPORT[sport];
 
   async function refreshVisibleLines(eventId: string) {
@@ -264,6 +310,20 @@ function App() {
       );
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to refresh lines");
+    } finally {
+      setRefreshingKey(null);
+    }
+  }
+
+  // Odds refresh automatically at most once a day; this is the manual override.
+  // It spends provider quota (about 3 credits), so it is a deliberate click.
+  async function refreshAllOdds() {
+    setRefreshingKey(REFRESH_ALL_KEY);
+    setError(null);
+    try {
+      setData(await fetchOdds(sport, { forceRefresh: true, includeProps: needsPlayerProps }));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to refresh odds");
     } finally {
       setRefreshingKey(null);
     }
@@ -347,6 +407,24 @@ function App() {
       </section>
 
       {error && <div className="notice error-notice">{error}</div>}
+      {freshness.warning && (
+        <div className="notice stale-notice" role="alert">
+          {freshness.warning}
+        </div>
+      )}
+      <div className="odds-toolbar">
+        {freshness.updated && !freshness.warning && (
+          <p className="odds-updated">Odds last updated {freshness.updated}</p>
+        )}
+        <button
+          className="refresh-button"
+          disabled={refreshingKey !== null}
+          onClick={() => void refreshAllOdds()}
+          type="button"
+        >
+          {refreshingKey === REFRESH_ALL_KEY ? "Refreshing odds..." : "Refresh odds"}
+        </button>
+      </div>
 
       <section className="events-grid" aria-live="polite">
         {data?.events.length ? (

@@ -5,7 +5,12 @@ import httpx
 import pytest
 from app.domain.models import EventComparison, Sport
 from app.providers.cache import CachedOddsProvider
-from app.providers.errors import ProviderAuthError, ProviderRateLimitError, ProviderTimeoutError
+from app.providers.errors import (
+    ProviderAuthError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+    ProviderUpstreamError,
+)
 from app.providers.the_odds_api.client import TheOddsApiClient
 
 
@@ -16,6 +21,7 @@ class CountingProvider:
     def __init__(self) -> None:
         self.calls = 0
         self.fail = False
+        self.error: Optional[Exception] = None
         self.quota_remaining: Optional[int] = None
 
     async def get_comparisons(
@@ -27,6 +33,8 @@ class CountingProvider:
         include_player_props: bool = False,
     ) -> list[EventComparison]:
         self.calls += 1
+        if self.error:
+            raise self.error
         if self.fail:
             raise TimeoutError("fixture failure")
         return []
@@ -155,16 +163,15 @@ def test_cache_force_refresh_bypasses_warm_snapshot() -> None:
         (Sport.NBA, "/v4/sports/basketball_nba/odds"),
     ],
 )
-def test_odds_api_client_requests_main_and_alternate_markets(
+def test_odds_api_client_bulk_request_uses_sport_path_and_featured_markets(
     sport: Sport, expected_path: str
 ) -> None:
     async def scenario() -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.url.path == expected_path
             requested_markets = set(request.url.params["markets"].split(","))
-            assert {"h2h", "spreads", "totals", "alternate_spreads"}.issubset(
-                requested_markets
-            )
+            # Alternates are per-event only; in bulk they cause 422 INVALID_MARKET.
+            assert requested_markets == {"h2h", "spreads", "totals"}
             return httpx.Response(200, json=[], request=request)
 
         client = TheOddsApiClient("test-key", transport=httpx.MockTransport(handler))
@@ -205,5 +212,106 @@ def test_odds_api_client_requests_player_props_per_event(
 
         payload = await client.fetch_event_player_props(sport, "event-1")
         assert payload == {"id": "event-1", "bookmakers": []}
+
+    asyncio.run(scenario())
+
+def _bulk_endpoint_handler(requests: list[httpx.Request]):
+    """Mimics The Odds API bulk endpoint: only featured markets are allowed."""
+    allowed = {"h2h", "spreads", "totals"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        markets = set(request.url.params["markets"].split(","))
+        unsupported = sorted(markets - allowed)
+        if unsupported:
+            return httpx.Response(
+                422,
+                headers={"x-requests-remaining": "480"},
+                json={
+                    "message": "Markets not supported by this endpoint: " + ", ".join(unsupported),
+                    "error_code": "INVALID_MARKET",
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200, headers={"x-requests-remaining": "477"}, json=[], request=request
+        )
+
+    return handler
+
+
+@pytest.mark.parametrize("sport", [Sport.NFL, Sport.NBA])
+def test_bulk_request_only_asks_for_markets_the_bulk_endpoint_supports(sport: Sport) -> None:
+    async def scenario() -> None:
+        requests: list[httpx.Request] = []
+        client = TheOddsApiClient(
+            "test-key", transport=httpx.MockTransport(_bulk_endpoint_handler(requests))
+        )
+
+        assert await client.fetch_odds(sport) == []
+        assert len(requests) == 1
+        assert requests[0].url.params["markets"] == "h2h,spreads,totals"
+
+    asyncio.run(scenario())
+
+
+def test_client_error_reports_status_and_body_and_is_not_retried() -> None:
+    async def scenario() -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                422,
+                json={"message": "Markets not supported", "error_code": "INVALID_MARKET"},
+                request=request,
+            )
+
+        client = TheOddsApiClient(
+            "test-key", backoff_seconds=0, transport=httpx.MockTransport(handler)
+        )
+
+        with pytest.raises(ProviderUpstreamError) as error:
+            await client.fetch_odds(Sport.NFL)
+
+        assert "422" in str(error.value)
+        assert "INVALID_MARKET" in str(error.value)
+        assert "test-key" not in str(error.value)
+        assert len(requests) == 1  # a 4xx will never succeed on retry, and burns time
+
+    asyncio.run(scenario())
+
+
+def test_rate_limit_starts_a_cooldown_during_which_the_provider_is_not_called() -> None:
+    async def scenario() -> None:
+        inner = CountingProvider()
+        provider = CachedOddsProvider(inner, ttl_seconds=0, rate_limit_cooldown_seconds=600)
+
+        await provider.get_comparisons(Sport.NFL)  # last good snapshot
+        inner.error = ProviderRateLimitError("The Odds API rate limit was reached")
+        await provider.get_comparisons(Sport.NFL)  # hits the 429, serves last good
+        calls_after_429 = inner.calls
+        await provider.get_comparisons(Sport.NFL)
+        await provider.get_comparisons(Sport.NFL, force_refresh=True)
+
+        assert inner.calls == calls_after_429  # backed off: no further upstream calls
+        assert provider.status == "stale"
+        assert provider.last_error_type == "rate_limited"
+
+    asyncio.run(scenario())
+
+
+def test_rate_limit_cooldown_without_a_snapshot_raises_without_calling_provider() -> None:
+    async def scenario() -> None:
+        inner = CountingProvider()
+        inner.error = ProviderRateLimitError("The Odds API rate limit was reached")
+        provider = CachedOddsProvider(inner, ttl_seconds=0, rate_limit_cooldown_seconds=600)
+
+        with pytest.raises(ProviderRateLimitError):
+            await provider.get_comparisons(Sport.NFL)
+        with pytest.raises(ProviderRateLimitError):
+            await provider.get_comparisons(Sport.NFL)
+
+        assert inner.calls == 1
 
     asyncio.run(scenario())

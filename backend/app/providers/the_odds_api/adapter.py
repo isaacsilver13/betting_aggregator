@@ -14,7 +14,10 @@ class TheOddsApiProvider:
 
     def __init__(self, client: TheOddsApiClient, max_concurrent_prop_fetches: int = 5) -> None:
         self.client = client
-        self._prop_fetch_semaphore = asyncio.Semaphore(max_concurrent_prop_fetches)
+        self._max_concurrent_prop_fetches = max_concurrent_prop_fetches
+        # Created lazily: on Python 3.9 a Semaphore binds to the event loop that
+        # exists when it is constructed, which is not the loop requests run on.
+        self._prop_fetch_semaphore: Optional[asyncio.Semaphore] = None
 
     @property
     def quota_remaining(self) -> Optional[int]:
@@ -50,8 +53,12 @@ class TheOddsApiProvider:
         page load can't silently burn the whole free-tier budget.
         """
 
+        if self._prop_fetch_semaphore is None:
+            self._prop_fetch_semaphore = asyncio.Semaphore(self._max_concurrent_prop_fetches)
+        semaphore = self._prop_fetch_semaphore
+
         async def fetch_one(comparison: EventComparison) -> EventComparison:
-            async with self._prop_fetch_semaphore:
+            async with semaphore:
                 if self.client.quota_remaining is not None and self.client.quota_remaining <= 0:
                     return comparison
                 raw_event_id = comparison.event.id.split(":", 1)[1]

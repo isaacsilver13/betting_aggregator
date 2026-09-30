@@ -2,10 +2,10 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.models import EventComparison, MarketType, Offer, Sport
+from app.domain.models import Event, EventComparison, MarketType, Offer, Sport
 from app.storage.models import (
     EventRecord,
     OfferObservation,
@@ -171,6 +171,92 @@ class OddsRepository:
                 )
                 for row in rows
             ]
+
+    async def last_success_at(self, provider: str, sport: Optional[Sport]) -> Optional[datetime]:
+        """When the provider last refreshed this sport successfully (None if never)."""
+        async with self.session_factory() as session:
+            sport_filter = (
+                ProviderRefreshRun.sport == sport.value
+                if sport
+                else ProviderRefreshRun.sport.is_(None)
+            )
+            query = select(func.max(ProviderRefreshRun.completed_at)).where(
+                ProviderRefreshRun.provider == provider,
+                ProviderRefreshRun.status == "succeeded",
+                sport_filter,
+            )
+            return await session.scalar(query)
+
+    async def latest_comparisons(
+        self, provider: str, sport: Optional[Sport]
+    ) -> list[EventComparison]:
+        """Rebuild the most recent saved snapshot of each event.
+
+        Used to keep serving the last good odds when a live refresh fails and
+        the in-memory cache is empty (e.g. right after a Fly machine wakes).
+        """
+        async with self.session_factory() as session:
+            newest = (
+                select(
+                    OfferObservation.event_id.label("event_id"),
+                    func.max(OfferObservation.observed_at).label("observed_at"),
+                )
+                .where(OfferObservation.provider == provider)
+                .group_by(OfferObservation.event_id)
+                .subquery()
+            )
+            query = (
+                select(EventRecord, OfferObservation)
+                .join(OfferObservation, OfferObservation.event_id == EventRecord.id)
+                .join(
+                    newest,
+                    and_(
+                        newest.c.event_id == OfferObservation.event_id,
+                        newest.c.observed_at == OfferObservation.observed_at,
+                    ),
+                )
+                .where(OfferObservation.provider == provider)
+                .order_by(EventRecord.start_time, OfferObservation.id)
+            )
+            if sport is not None:
+                query = query.where(EventRecord.sport == sport.value)
+            rows = (await session.execute(query)).all()
+
+        by_event: dict[str, EventComparison] = {}
+        for event_row, row in rows:
+            comparison = by_event.get(event_row.id)
+            if comparison is None:
+                comparison = EventComparison(
+                    event=Event(
+                        id=event_row.id,
+                        sport=Sport(event_row.sport),
+                        league=event_row.league,
+                        home_team=event_row.home_team,
+                        away_team=event_row.away_team,
+                        start_time=event_row.start_time,
+                    ),
+                    offers=[],
+                )
+                by_event[event_row.id] = comparison
+            comparison.offers.append(
+                Offer(
+                    event_id=row.event_id,
+                    provider=row.provider,
+                    bookmaker=row.bookmaker,
+                    market_type=MarketType(row.market_type),
+                    selection=row.selection,
+                    line=row.line,
+                    price_american=row.price_american,
+                    price_decimal=row.price_decimal,
+                    player_name=row.player_name,
+                    provider_offer_id=row.provider_offer_id,
+                    provider_updated_at=row.provider_updated_at,
+                    observed_at=row.observed_at,
+                    deep_link=row.deep_link,
+                    status=row.status,
+                )
+            )
+        return list(by_event.values())
 
     async def prune_expired(self, retention_days: int, now: datetime) -> int:
         if retention_days <= 0:

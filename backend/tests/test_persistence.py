@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.config import ProviderMode, Settings
-from app.domain.models import MarketType
+from app.domain.models import MarketType, Sport
 from app.providers.fixture import FixtureOddsProvider
 from app.storage.database import create_engine, create_schema, create_session_factory
 from app.storage.repository import OddsRepository
@@ -90,5 +90,91 @@ def test_fixture_comparisons_persist_as_immutable_observations() -> None:
         assert await repository.count_refresh_runs("fixture") == 2
         assert await repository.count_observations(comparisons[0].event.id) == 16
         await engine.dispose()
+
+    asyncio.run(scenario())
+
+def test_latest_comparisons_returns_only_the_newest_snapshot_per_event() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        await create_schema(engine)
+        repository = OddsRepository(create_session_factory(engine))
+        provider = FixtureOddsProvider()
+        comparisons = await provider.get_comparisons()
+        older = datetime.now(timezone.utc) - timedelta(hours=2)
+        newer = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        def restamp(observed_at: datetime):
+            return [
+                comparison.model_copy(
+                    update={
+                        "offers": [
+                            offer.model_copy(update={"observed_at": observed_at})
+                            for offer in comparison.offers
+                        ]
+                    }
+                )
+                for comparison in comparisons
+            ]
+
+        for observed_at in (older, newer):
+            await repository.record_comparisons(
+                provider=provider.name,
+                comparisons=restamp(observed_at),
+                started_at=observed_at,
+                completed_at=observed_at,
+            )
+
+        latest = await repository.latest_comparisons(provider.name, sport=None)
+
+        assert {c.event.id for c in latest} == {c.event.id for c in comparisons}
+        for comparison in latest:
+            expected = next(c for c in comparisons if c.event.id == comparison.event.id)
+            assert len(comparison.offers) == len(expected.offers)
+            # SQLite drops tzinfo; Postgres keeps it.
+            assert {
+                offer.observed_at.replace(tzinfo=timezone.utc) for offer in comparison.offers
+            } == {newer}
+
+    asyncio.run(scenario())
+
+
+def test_latest_comparisons_is_empty_when_nothing_was_ever_stored() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        await create_schema(engine)
+        repository = OddsRepository(create_session_factory(engine))
+
+        assert await repository.latest_comparisons("the_odds_api", sport=None) == []
+
+    asyncio.run(scenario())
+
+
+def test_last_success_at_tracks_the_newest_successful_refresh_per_sport() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        await create_schema(engine)
+        repository = OddsRepository(create_session_factory(engine))
+        assert await repository.last_success_at("fixture", Sport.NFL) is None
+
+        earlier = datetime.now(timezone.utc) - timedelta(hours=5)
+        later = datetime.now(timezone.utc) - timedelta(hours=1)
+        await repository.record_comparisons(
+            provider="fixture", comparisons=[], started_at=earlier, completed_at=earlier,
+            sport=Sport.NFL,
+        )
+        await repository.record_comparisons(
+            provider="fixture", comparisons=[], started_at=later, completed_at=later,
+            sport=Sport.NFL,
+        )
+        await repository.record_refresh_failure(
+            provider="fixture", started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc), error_type="upstream_error",
+            error_message="boom", sport=Sport.NFL,
+        )
+
+        newest = await repository.last_success_at("fixture", Sport.NFL)
+        assert newest is not None
+        assert newest.replace(tzinfo=timezone.utc) == later  # failures don't count
+        assert await repository.last_success_at("fixture", Sport.NBA) is None
 
     asyncio.run(scenario())

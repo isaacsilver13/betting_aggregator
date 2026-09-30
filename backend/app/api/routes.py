@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+import logging
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -6,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.config import ProviderMode, Settings, load_settings
 from app.domain.models import (
     ComparisonResponse,
+    EventComparison,
     HistoryResponse,
     MarketType,
     ProviderDetails,
@@ -24,6 +27,7 @@ from app.storage.database import create_engine, create_session_factory
 from app.storage.repository import OddsRepository
 
 router = APIRouter(prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
 
 def build_provider(settings: Optional[Settings] = None) -> OddsProvider:
@@ -112,6 +116,38 @@ async def get_odds(
     ),
 ) -> ComparisonResponse:
     started_at = datetime.now(timezone.utc)
+    if not force_refresh and not include_props and repository is not None and sport is not None:
+        # Daily gate: the in-memory cache dies whenever Fly stops the machine, so
+        # the last successful refresh recorded in the database is what actually
+        # limits how often we spend provider quota. Manual refresh bypasses it.
+        last_success = await repository.last_success_at(provider.name, sport)
+        if last_success is not None:
+            last_success = _aware(last_success)
+            if started_at - last_success < timedelta(seconds=settings.cache_ttl_seconds):
+                saved = await repository.latest_comparisons(provider.name, sport)
+                if saved:
+                    logger.info(
+                        "odds served from saved snapshot source=%s sport=%s games=%d age_s=%d",
+                        provider.name,
+                        sport.value,
+                        len(saved),
+                        (started_at - last_success).total_seconds(),
+                    )
+                    return ComparisonResponse(
+                        generated_at=started_at,
+                        provider_status={provider.name: "configured"},
+                        provider_details={
+                            provider.name: ProviderDetails(
+                                status="configured",
+                                cache_hit=True,
+                                last_refreshed_at=last_success,
+                                quota_remaining=getattr(provider, "quota_remaining", None),
+                            )
+                        },
+                        events=scope_comparisons(
+                            [canonicalize_comparison(c) for c in saved], event_id, market_type
+                        ),
+                    )
     provider_error: Optional[OddsProviderError] = None
     try:
         comparisons = await provider.get_comparisons(
@@ -124,12 +160,21 @@ async def get_odds(
     except OddsProviderError as error:
         provider_error = error
         comparisons = []
+    saved_snapshot_at: Optional[datetime] = None
+    if provider_error is not None and repository is not None:
+        # Keep serving the last good odds instead of an empty board -- the
+        # in-memory cache is gone after a Fly machine autostops.
+        saved = await repository.latest_comparisons(provider.name, sport)
+        if saved:
+            comparisons = saved
+            saved_snapshot_at = _newest_observation(saved)
     comparisons = scope_comparisons(
         [canonicalize_comparison(comparison) for comparison in comparisons],
         event_id,
         market_type,
     )
     completed_at = datetime.now(timezone.utc)
+    _log_fetch(sport, provider, comparisons, provider_error, saved_snapshot_at)
     if repository is not None:
         if provider_error is None:
             await repository.record_comparisons(
@@ -150,15 +195,20 @@ async def get_odds(
                 quota_remaining=getattr(provider, "quota_remaining", None),
             )
         await repository.prune_expired(settings.observation_retention_days, completed_at)
+    if provider_error is None:
+        status = provider.status
+    else:
+        status = "stale" if saved_snapshot_at else "error"
     return ComparisonResponse(
         generated_at=completed_at,
-        provider_status={provider.name: "error" if provider_error else provider.status},
+        provider_status={provider.name: status},
         provider_details={
             provider.name: ProviderDetails(
-                status="error" if provider_error else provider.status,
+                status=status,
                 cache_hit=bool(getattr(provider, "cache_hit", False)),
-                stale=provider.status == "stale",
-                last_refreshed_at=getattr(provider, "last_refreshed_at", None),
+                stale=provider.status == "stale" or saved_snapshot_at is not None,
+                last_refreshed_at=saved_snapshot_at
+                or getattr(provider, "last_refreshed_at", None),
                 error_type=(
                     provider_error.error_type
                     if provider_error
@@ -169,6 +219,43 @@ async def get_odds(
         },
         events=list(comparisons),
     )
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _newest_observation(comparisons: list[EventComparison]) -> Optional[datetime]:
+    observed = [offer.observed_at for c in comparisons for offer in c.offers]
+    if not observed:
+        return None
+    return _aware(max(observed))
+
+
+def _log_fetch(
+    sport: Optional[Sport],
+    provider: OddsProvider,
+    comparisons: Sequence[EventComparison],
+    error: Optional[OddsProviderError],
+    saved_snapshot_at: Optional[datetime],
+) -> None:
+    """One line per odds request: source, sport, outcome, games, offers, quota."""
+    fields = (
+        f"source={provider.name} sport={sport.value if sport else 'all'} "
+        f"games={len(comparisons)} offers={sum(len(c.offers) for c in comparisons)} "
+        f"cache_hit={bool(getattr(provider, 'cache_hit', False))} "
+        f"quota_remaining={getattr(provider, 'quota_remaining', None)}"
+    )
+    if error is None:
+        logger.info("odds fetch ok %s", fields)
+    else:
+        logger.error(
+            "odds fetch failed error_type=%s served_saved_snapshot=%s %s detail=%s",
+            error.error_type,
+            saved_snapshot_at is not None,
+            fields,
+            error,
+        )
 
 
 @router.get("/history", response_model=HistoryResponse)

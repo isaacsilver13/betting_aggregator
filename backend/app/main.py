@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -5,7 +6,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app import error_log
 from app.api.routes import router
+
+# Uvicorn only configures its own loggers, so without this the app's per-fetch
+# INFO lines are dropped and /health/errors never sees a failure.
+logging.getLogger("app").setLevel(logging.INFO)
+if not logging.getLogger("app").handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logging.getLogger("app").addHandler(_handler)
+error_log.install()
 
 app = FastAPI(
     title="Betting Aggregator API",
