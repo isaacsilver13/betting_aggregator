@@ -1,3 +1,6 @@
+import asyncio
+from datetime import datetime, timezone
+
 import pytest
 from app.api.routes import build_provider
 from app.config import ProviderMode, load_settings
@@ -26,6 +29,9 @@ class SpyRepository:
 
     async def prune_expired(self, *args, **kwargs):
         return 0
+
+    async def latest_comparisons(self, provider, sport):
+        return []
 
 
 class FailingProvider:
@@ -280,3 +286,55 @@ def test_provider_selection_uses_the_odds_api_key(monkeypatch) -> None:
     monkeypatch.setenv("PROVIDER_MODE", "live")
 
     assert isinstance(build_provider(), TheOddsApiProvider)
+
+
+def test_odds_route_serves_last_saved_snapshot_when_provider_fails(monkeypatch) -> None:
+    saved_at = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    saved = asyncio.run(FixtureOddsProvider().get_comparisons())
+    saved = [
+        c.model_copy(
+            update={"offers": [o.model_copy(update={"observed_at": saved_at}) for o in c.offers]}
+        )
+        for c in saved
+    ]
+
+    class SavedSnapshotRepository(SpyRepository):
+        async def latest_comparisons(self, provider, sport):
+            return saved
+
+    monkeypatch.setattr("app.api.routes.provider", FailingProvider())
+    monkeypatch.setattr("app.api.routes.repository", SavedSnapshotRepository())
+
+    response = client.get("/api/v1/odds")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["events"]) == len(saved)
+    details = body["provider_details"]["failing"]
+    assert details["stale"] is True
+    assert details["error_type"] == "timeout"
+    assert details["last_refreshed_at"].startswith("2026-09-28T12:00:00")
+    assert body["provider_status"]["failing"] == "stale"
+
+
+def test_odds_route_reports_error_when_provider_fails_and_nothing_was_saved(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.api.routes.provider", FailingProvider())
+    monkeypatch.setattr("app.api.routes.repository", SpyRepository())
+
+    body = client.get("/api/v1/odds").json()
+
+    assert body["events"] == []
+    assert body["provider_status"]["failing"] == "error"
+    assert body["provider_details"]["failing"]["stale"] is False
+
+
+def test_logged_errors_show_up_in_health_errors() -> None:
+    import logging
+
+    logging.getLogger("app.api.routes").error("odds fetch failed error_type=test")
+
+    errors = client.get("/api/v1/health/errors").json()["errors"]
+
+    assert any("odds fetch failed error_type=test" in entry["message"] for entry in errors)

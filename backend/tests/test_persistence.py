@@ -92,3 +92,58 @@ def test_fixture_comparisons_persist_as_immutable_observations() -> None:
         await engine.dispose()
 
     asyncio.run(scenario())
+
+def test_latest_comparisons_returns_only_the_newest_snapshot_per_event() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        await create_schema(engine)
+        repository = OddsRepository(create_session_factory(engine))
+        provider = FixtureOddsProvider()
+        comparisons = await provider.get_comparisons()
+        older = datetime.now(timezone.utc) - timedelta(hours=2)
+        newer = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        def restamp(observed_at: datetime):
+            return [
+                comparison.model_copy(
+                    update={
+                        "offers": [
+                            offer.model_copy(update={"observed_at": observed_at})
+                            for offer in comparison.offers
+                        ]
+                    }
+                )
+                for comparison in comparisons
+            ]
+
+        for observed_at in (older, newer):
+            await repository.record_comparisons(
+                provider=provider.name,
+                comparisons=restamp(observed_at),
+                started_at=observed_at,
+                completed_at=observed_at,
+            )
+
+        latest = await repository.latest_comparisons(provider.name, sport=None)
+
+        assert {c.event.id for c in latest} == {c.event.id for c in comparisons}
+        for comparison in latest:
+            expected = next(c for c in comparisons if c.event.id == comparison.event.id)
+            assert len(comparison.offers) == len(expected.offers)
+            # SQLite drops tzinfo; Postgres keeps it.
+            assert {
+                offer.observed_at.replace(tzinfo=timezone.utc) for offer in comparison.offers
+            } == {newer}
+
+    asyncio.run(scenario())
+
+
+def test_latest_comparisons_is_empty_when_nothing_was_ever_stored() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        await create_schema(engine)
+        repository = OddsRepository(create_session_factory(engine))
+
+        assert await repository.latest_comparisons("the_odds_api", sport=None) == []
+
+    asyncio.run(scenario())
