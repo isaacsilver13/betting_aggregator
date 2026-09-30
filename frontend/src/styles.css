@@ -665,3 +665,9 @@ footer {
     padding: 20px;
   }
 }
+
+.odds-updated {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}

@@ -2,7 +2,46 @@ import { useEffect, useState } from "react";
 
 import { fetchOdds } from "./lib/api";
 import { GlassCard } from "./components/GlassCard";
-import { isPlayerPropMarket, type EventComparison, type MarketType, type Offer, type Sport } from "./types";
+import {
+  isPlayerPropMarket,
+  type EventComparison,
+  type MarketType,
+  type Offer,
+  type ProviderDetails,
+  type Sport,
+} from "./types";
+
+// Odds older than this get a warning even if the backend didn't flag them.
+const VERY_OLD_AFTER_MS = 24 * 60 * 60 * 1000;
+
+function describeFreshness(
+  details: ProviderDetails | undefined,
+  hasEvents: boolean,
+  now: number,
+): { updated: string | null; warning: string | null } {
+  if (!details) {
+    return { updated: null, warning: null };
+  }
+  const refreshedAt = details.last_refreshed_at ? new Date(details.last_refreshed_at) : null;
+  const updated = refreshedAt ? refreshedAt.toLocaleString() : null;
+  const reason = details.error_type ? details.error_type.replaceAll("_", " ") : "unknown error";
+  if (details.status === "error" && !hasEvents) {
+    return {
+      updated,
+      warning: `Odds are unavailable right now (${reason}). No saved odds to show yet.`,
+    };
+  }
+  if (details.stale) {
+    return {
+      updated,
+      warning: `Showing saved odds${updated ? ` from ${updated}` : ""}. The latest refresh failed (${reason}), so lines may have moved.`,
+    };
+  }
+  if (refreshedAt && now - refreshedAt.getTime() > VERY_OLD_AFTER_MS) {
+    return { updated, warning: `These odds are over a day old (last updated ${updated}).` };
+  }
+  return { updated, warning: null };
+}
 
 const SPORTS: Array<{ id: Sport; label: string }> = [
   { id: "nfl", label: "NFL" },
@@ -247,6 +286,11 @@ function App() {
   }, [sport, needsPlayerProps]);
 
   const providerStatus = Object.entries(data?.provider_status ?? {});
+  const freshness = describeFreshness(
+    Object.values(data?.provider_details ?? {})[0],
+    (data?.events.length ?? 0) > 0,
+    Date.now(),
+  );
   const secondaryMarkets = SECONDARY_MARKETS_BY_SPORT[sport];
 
   async function refreshVisibleLines(eventId: string) {
@@ -347,6 +391,14 @@ function App() {
       </section>
 
       {error && <div className="notice error-notice">{error}</div>}
+      {freshness.warning && (
+        <div className="notice stale-notice" role="alert">
+          {freshness.warning}
+        </div>
+      )}
+      {freshness.updated && !freshness.warning && (
+        <p className="odds-updated">Odds last updated {freshness.updated}</p>
+      )}
 
       <section className="events-grid" aria-live="polite">
         {data?.events.length ? (
